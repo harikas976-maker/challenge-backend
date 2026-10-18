@@ -29,7 +29,7 @@ const userStore = {
     return user;
   },
   getUser(id) {
-    return this.users[id];
+    return Object.hasOwn(this.users, id) ? this.users[id] : undefined;
   },
   getUsers() {
     return Object.values(this.users);
@@ -89,7 +89,8 @@ const server = setupServer(
   }),
 
   http.get('http://event.com/getUserById/:id', ({params}) => {
-    return HttpResponse.json(userStore.getUser(params.id))
+    const found = userStore.getUser(params.id);
+    return found ? HttpResponse.json(found) : HttpResponse.json({ error: 'User not found' }, { status: 404 });
   }),
   
   http.post('http://event.com/addEvent', async ({request}) => {
@@ -97,6 +98,12 @@ const server = setupServer(
     // Simulate a successful response for the first 5 requests
     if (requestCount <= 5 || requestCount == 0) {
       const requestBody = await request.json()
+      if (typeof requestBody.name !== 'string' || !requestBody.name.trim() || requestBody.userId == null || requestBody.id == null) {
+        return HttpResponse.json({ error: 'Invalid event' }, { status: 400 });
+      }
+      if (!userStore.getUser(requestBody.userId)) {
+        return HttpResponse.json({ error: 'User not found' }, { status: 404 });
+      }
       eventStore.addEvent(requestBody);
       userStore.addEventTouUser(requestBody.userId, requestBody.id)
       return HttpResponse.json({
@@ -136,3 +143,4 @@ const listenMock = () => {
 }
 
 module.exports = listenMock;
+module.exports.close = () => server.close();

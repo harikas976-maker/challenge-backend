@@ -7,3 +7,6 @@ npm-debug.log*
 coverage/
 .DS_Store
 Thumbs.db
+docs/IMPLEMENTATION_PLAN.md
+docs/CHALLENGES.md
+docs/baseline/
