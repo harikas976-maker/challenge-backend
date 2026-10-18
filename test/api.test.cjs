@@ -142,3 +142,19 @@ test('numeric user ID and optional details remain supported', async t => {
   assert.equal(response.statusCode, 200);
   assert.equal(writes[0].details, 'Some details');
 });
+
+test('user with no events returns an empty array', async t => {
+  const { app } = setup(t, [http.get('http://event.com/getUserById/:id', () =>
+    HttpResponse.json({ id: 1, events: [] }))]);
+  const response = await app.inject({ method: 'GET', url: '/getEventsByUserId/1' });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), []);
+});
+
+test('failed event lookup returns an error rather than partial data', async t => {
+  const { app } = setup(t, [http.get('http://event.com/getEventById/event-3', () =>
+    new HttpResponse(null, { status: 503 }))]);
+  const response = await app.inject({ method: 'GET', url: '/getEventsByUserId/1' });
+  assert.equal(response.statusCode, 503);
+  assert.equal(Array.isArray(response.json()), false);
+});

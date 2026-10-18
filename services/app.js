@@ -50,10 +50,25 @@ function buildApp({ logger = false, upstreamTimeoutMs = 2000 } = {}) {
     } }
   }, async request => {
     const user = await getUser(request.params.id);
-    const events = [];
-    for (const id of user.events) {
-      events.push(await upstream(`/getEventById/${encodeURIComponent(id)}`));
+    const events = new Array(user.events.length);
+    let nextIndex = 0;
+    let failure;
+
+    async function worker() {
+      while (!failure && nextIndex < user.events.length) {
+        const index = nextIndex++;
+        try {
+          events[index] = await upstream(`/getEventById/${encodeURIComponent(user.events[index])}`);
+        } catch (error) {
+          failure ??= error;
+        }
+      }
     }
+
+    // Bound traffic per request and retain order regardless of completion order.
+    // Drain in-flight work on failure; no worker schedules another lookup afterward.
+    await Promise.all(Array.from({ length: Math.min(5, user.events.length) }, worker));
+    if (failure) throw failure;
     return events;
   });
   return app;

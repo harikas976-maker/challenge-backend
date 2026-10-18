@@ -28,6 +28,11 @@ creation cycles through five successes and ten failures. These simulations remai
 enabled. Automated tests use controlled upstream responses to avoid random test
 failures and also verify rejected writes against the real mock.
 
-Event fetching is still sequential. Circuit breaking and backoff are not yet
-implemented. The service has no persistent storage or authentication and is
-intended for this development exercise.
+Event lookup runs up to five requests concurrently per incoming request and
+preserves event order. This cap is per request, not a global limit across clients.
+If a lookup fails, no further lookups are scheduled and the request returns an
+error after in-flight work finishes. See [the JMeter plan](performance/README.md)
+for reproducible local latency measurements.
+
+Circuit breaking and backoff are not yet implemented. The service has no persistent
+storage or authentication and is intended for this development exercise.
