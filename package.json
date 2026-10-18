@@ -1,16 +1,19 @@
 {
   "name": "challenge-backend",
   "version": "1.0.0",
-  "main": "index.js",
+  "private": true,
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test test/*.test.cjs",
     "start": "node services"
   },
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "fastify": "^4.28.0",
+    "fastify": "^5.12.7",
     "msw": "^2.7.3"
   }
 }
