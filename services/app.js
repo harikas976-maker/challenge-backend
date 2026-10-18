@@ -1,8 +1,8 @@
 const fastify = require('fastify');
-const { randomUUID } = require('node:crypto');
 const { ApiError, createUpstreamClient } = require('./upstream');
+const createEventWriter = require('./event-creation');
 
-function buildApp({ logger = false, upstreamTimeoutMs = 2000 } = {}) {
+function buildApp({ logger = false, upstreamTimeoutMs = 2000, resilience = {} } = {}) {
   const app = fastify({ logger,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } }
   });
@@ -13,36 +13,35 @@ function buildApp({ logger = false, upstreamTimeoutMs = 2000 } = {}) {
     if (status >= 500) request.log.error({ err: error }, 'Request failed');
     const message = error.validation ? 'Invalid request input' : error instanceof ApiError ? error.message
       : status < 500 ? 'Invalid request' : 'Internal server error';
+    if (error.retryAfterSeconds) reply.header('Retry-After', error.retryAfterSeconds);
     reply.code(status).send({ error: message });
   });
-  async function getUser(id) {
-    const user = await upstream(`/getUserById/${encodeURIComponent(id)}`);
+  async function getUser(id, options) {
+    const user = await upstream(`/getUserById/${encodeURIComponent(id)}`, options);
     if (!user || !Array.isArray(user.events)) throw new ApiError(502, 'Invalid user response from event service');
     return user;
   }
+  const createEvent = createEventWriter({ ...resilience, upstream, getUser, logger: app.log });
   app.get('/getUsers', async () => upstream('/getUsers'));
   app.get('/getEvents', async () => upstream('/getEvents'));
   app.post('/addEvent', {
-    schema: { body: {
-      type: 'object', additionalProperties: false, required: ['name', 'userId'],
-      properties: {
-        name: { type: 'string', minLength: 1, maxLength: 200, pattern: '\\S' },
-        userId: { anyOf: [
-          { type: 'string', pattern: '^[1-9][0-9]*$' }, { type: 'integer', minimum: 1 }
-        ] },
-        details: { type: 'string', maxLength: 2000 }
+    schema: {
+      headers: {
+        type: 'object',
+        properties: { 'idempotency-key': { type: 'string', pattern: '^[A-Za-z0-9._:-]{1,128}$' } }
+      },
+      body: {
+        type: 'object', additionalProperties: false, required: ['name', 'userId'],
+        properties: {
+          name: { type: 'string', minLength: 1, maxLength: 200, pattern: '\\S' },
+          userId: { anyOf: [
+            { type: 'string', pattern: '^[1-9][0-9]*$' }, { type: 'integer', minimum: 1 }
+          ] },
+          details: { type: 'string', maxLength: 2000 }
+        }
       }
-    } }
-  }, async request => {
-    const { name, userId, details } = request.body;
-    await getUser(userId);
-    const result = await upstream('/addEvent', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, userId, ...(details !== undefined ? { details } : {}), id: randomUUID() })
-    });
-    if (result?.success !== true) throw new ApiError(502, 'Invalid creation response from event service');
-    return { success: true };
-  });
+    }
+  }, async request => createEvent(request.body, request.headers['idempotency-key']));
   app.get('/getEventsByUserId/:id', {
     schema: { params: {
       type: 'object', required: ['id'],

@@ -99,16 +99,20 @@ test('upstream internal errors are not exposed to clients', async t => {
   assert.ok(response.statusCode >= 500);
 });
 
-test('upstream timeout returns 504 without replaying the write', async t => {
+test('upstream timeout retries once with a stable idempotency key, then returns 504', async t => {
   let attempts = 0;
-  const { app } = setup(t, [http.post('http://event.com/addEvent', async () => {
+  const keys = [];
+  const { app } = setup(t, [http.post('http://event.com/addEvent', async ({ request }) => {
     attempts++;
+    keys.push(request.headers.get('Idempotency-Key'));
     await delay(100);
     return HttpResponse.json({ success: true });
   })], { upstreamTimeoutMs: 30 });
   const response = await app.inject({ method: 'POST', url: '/addEvent', payload: { name: 'Event', userId: '1' } });
   assert.equal(response.statusCode, 504);
-  assert.equal(attempts, 1);
+  assert.equal(attempts, 2);
+  assert.ok(keys[0]);
+  assert.equal(keys[0], keys[1]);
 });
 
 test('upstream transport error returns 502', async t => {
@@ -157,4 +161,54 @@ test('failed event lookup returns an error rather than partial data', async t =>
   const response = await app.inject({ method: 'GET', url: '/getEventsByUserId/1' });
   assert.equal(response.statusCode, 503);
   assert.equal(Array.isArray(response.json()), false);
+});
+
+test('invalid idempotency keys return 400 before any write', async t => {
+  const { app, writes } = setup(t);
+  const response = await app.inject({ method: 'POST', url: '/addEvent',
+    headers: { 'Idempotency-Key': 'invalid key with spaces' }, payload: { name: 'Event', userId: '1' } });
+  assert.equal(response.statusCode, 400);
+  assert.equal(writes.length, 0);
+});
+
+test('Retry-After beyond the retry budget is returned without an early retry', async t => {
+  let attempts = 0;
+  const { app } = setup(t, [http.post('http://event.com/addEvent', () => {
+    attempts++;
+    return new HttpResponse(null, { status: 429, headers: { 'Retry-After': '10' } });
+  })]);
+  const response = await app.inject({ method: 'POST', url: '/addEvent', payload: { name: 'Event', userId: '1' } });
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.headers['retry-after'], '10');
+  assert.equal(attempts, 1);
+});
+
+test('only one half-open HTTP request probes upstream; reads remain available', async t => {
+  let time = 0;
+  let attempts = 0;
+  let failing = true;
+  let finishProbe;
+  let startedProbe;
+  const probeStarted = new Promise(resolve => { startedProbe = resolve; });
+  const { app } = setup(t, [http.post('http://event.com/addEvent', async () => {
+    attempts++;
+    if (failing) return new HttpResponse(null, { status: 503 });
+    startedProbe();
+    await new Promise(resolve => { finishProbe = resolve; });
+    return HttpResponse.json({ success: true });
+  })], { resilience: { now: () => time, random: () => 0.5, wait: async ms => { time += ms; } } });
+  const send = () => app.inject({ method: 'POST', url: '/addEvent', payload: { name: 'Event', userId: '1' } });
+  assert.equal((await send()).statusCode, 503);
+  const opened = await send();
+  assert.equal(attempts, 3);
+  assert.equal((await app.inject({ method: 'GET', url: '/getUsers' })).statusCode, 200);
+  time += Number(opened.headers['retry-after']) * 1000;
+  failing = false;
+  const probe = send();
+  await probeStarted;
+  const rejected = await send();
+  assert.equal(rejected.statusCode, 503);
+  assert.equal(attempts, 4);
+  finishProbe();
+  assert.equal((await probe).statusCode, 200);
 });

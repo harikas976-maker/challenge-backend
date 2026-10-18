@@ -1,6 +1,9 @@
 const { http, HttpResponse, delay } = require('msw');
 const { setupServer } = require('msw/node');
 const user = require('./mocks/user.json');
+const { ApiError } = require('../services/upstream');
+const { IdempotencyStore, eventFingerprint } = require('../services/idempotency');
+const idempotency = new IdempotencyStore();
  
 let requestCount = 0
 const userStore = {
@@ -94,35 +97,35 @@ const server = setupServer(
   }),
   
   http.post('http://event.com/addEvent', async ({request}) => {
-    requestCount++
-    // Simulate a successful response for the first 5 requests
-    if (requestCount <= 5 || requestCount == 0) {
-      const requestBody = await request.json()
-      if (typeof requestBody.name !== 'string' || !requestBody.name.trim() || requestBody.userId == null || requestBody.id == null) {
-        return HttpResponse.json({ error: 'Invalid event' }, { status: 400 });
+    const requestBody = await request.json();
+    if (typeof requestBody.name !== 'string' || !requestBody.name.trim() || requestBody.userId == null || requestBody.id == null) {
+      return HttpResponse.json({ error: 'Invalid event' }, { status: 400 });
+    }
+    if (!userStore.getUser(requestBody.userId)) {
+      return HttpResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+    async function commit() {
+      requestCount++;
+      // Preserve five successful writes followed by ten failed attempts.
+      if (requestCount <= 5) {
+        eventStore.addEvent(requestBody);
+        userStore.addEventTouUser(requestBody.userId, requestBody.id);
+        return { success: true };
       }
-      if (!userStore.getUser(requestBody.userId)) {
-        return HttpResponse.json({ error: 'User not found' }, { status: 404 });
-      }
-      eventStore.addEvent(requestBody);
-      userStore.addEventTouUser(requestBody.userId, requestBody.id)
-      return HttpResponse.json({
-        success: true
+      if (requestCount >= 15) requestCount = 0;
+      await delay(100);
+      throw new ApiError(503, 'Service temporarily unavailable');
+    }
+    try {
+      const key = request.headers.get('Idempotency-Key');
+      const result = key ? await idempotency.execute(key, eventFingerprint(requestBody), commit) : await commit();
+      return HttpResponse.json(result);
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      return HttpResponse.json({ success: false, error: error.message }, {
+        status: error.statusCode,
+        headers: error.retryAfterSeconds ? { 'Retry-After': String(error.retryAfterSeconds) } : {}
       });
-    } 
-    // Then fail for the next 10 requests
-    else {
-      if (requestCount >= 15) {
-        requestCount = 0;
-      }
-      await delay(100)
-      return HttpResponse.json({
-        success: false,
-        error: 'Service temporarily unavailable',
-        message: 'Event API is experiencing high load'
-      },{
-        status: 503,
-      })
     }
   }),
   http.get('http://event.com/getEvents', () => {
